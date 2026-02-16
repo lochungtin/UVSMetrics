@@ -6,7 +6,7 @@ from scipy.ndimage import distance_transform_edt, binary_erosion, center_of_mass
 
 
 def seriesAnalysis(arr, labels=False):
-    out = (
+    out = [
         np.min(arr),
         np.percentile(arr, 5),
         np.percentile(arr, 10),
@@ -15,9 +15,9 @@ def seriesAnalysis(arr, labels=False):
         np.percentile(arr, 90),
         np.percentile(arr, 95),
         np.max(arr),
-    )
+    ]
     if labels:
-        return out, ("MIN", "P05", "P10", "AVG", "MDN", "P90", "P95", "MAX")
+        return out, ["MIN", "P05", "P10", "AVG", "MDN", "P90", "P95", "MAX"]
     return out
 
 
@@ -55,7 +55,7 @@ def rigidAlign(source, target, vector=None):
 
 
 def getVolume(mask):
-    return np.sum(mask)
+    return np.sum(mask).astype(np.int32)
 
 
 def getSurfaceArea(mask):
