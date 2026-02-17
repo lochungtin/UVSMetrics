@@ -1,6 +1,18 @@
 import numpy as np
-from scipy.ndimage import distance_transform_edt, binary_erosion, center_of_mass, shift
+import torch
+from scipy.ndimage import (
+    binary_dilation,
+    binary_erosion,
+    center_of_mass,
+    distance_transform_edt,
+    shift,
+)
 
+if torch.cuda.is_available():
+    DEV = "cuda"
+else:
+    DEV = "cpu"
+print(f"Metric Functions Using: {DEV}")
 
 # === helper functions ===
 
@@ -81,26 +93,37 @@ def getDilatedMask(thickness, mask=None, dmap=None):
 # === Surface Facing Metric ===
 
 
-def getFacingSurface(A, B, sA, sB, N=32):
-    visible = np.zeros(len(sB), dtype=bool)
-    T = np.linspace(2.0 / (N + 1), (N - 1.0) / (N + 1), N, dtype=np.float32)
-    SHAPE = A.shape
+def getFacingSurface(A, B, cutAwayDist=8, N=32):
+    cutA = (getDMap(B) * A > cutAwayDist) & A
 
-    for src in sA.astype(np.float32):
+    sA, sB = getSurface(cutA, idx=True), getSurface(B, idx=True)
+    visible = np.zeros(len(sB), dtype=bool)
+
+    _A = torch.tensor(cutA, dtype=torch.bool, device=DEV)
+    _B = torch.tensor(B, dtype=torch.bool, device=DEV)
+    SHAPE = _A.shape
+
+    T = torch.linspace(2.0 / (N + 1), (N - 1.0) / (N + 1), N, device=DEV)
+
+    for src in sA:
         todo = np.where(~visible)[0]
         if len(todo) == 0:
             break
 
-        pts = src[None, None, :] + T[None, :, None] * (sB[todo] - src)[:, None, :]
+        _sA = torch.tensor(src, dtype=torch.float32, device=DEV)
+        _sB = torch.tensor(sB[todo], dtype=torch.float32, device=DEV)
 
-        idx = np.round(pts).astype(np.int32)
+        pts = _sA[None, None, :] + T[None, :, None] * (_sB - _sA)[:, None, :]
 
-        idx[..., 0] = np.clip(idx[..., 0], 0, SHAPE[0] - 1)
-        idx[..., 1] = np.clip(idx[..., 1], 0, SHAPE[1] - 1)
-        idx[..., 2] = np.clip(idx[..., 2], 0, SHAPE[2] - 1)
+        idx = pts.round().long()
+
+        idx[..., 0].clamp_(0, SHAPE[0] - 1)
+        idx[..., 1].clamp_(0, SHAPE[1] - 1)
+        idx[..., 2].clamp_(0, SHAPE[2] - 1)
 
         x, y, z = idx[..., 0], idx[..., 1], idx[..., 2]
-        clear = ~(A[x, y, z] | B[x, y, z]).any(axis=1)
+        blocked = (_A[x, y, z] | _B[x, y, z]).any(dim=1)
+        clear = (~blocked).cpu().numpy()
 
         visible[todo[clear]] = True
 
@@ -109,21 +132,40 @@ def getFacingSurface(A, B, sA, sB, N=32):
     return face
 
 
-def getFacingSurfaces(A, B):
-    sA = getSurface(A, idx=True)
-    sB = getSurface(B, idx=True)
-    return getFacingSurface(B, A, sB, sA), getFacingSurface(A, B, sA, sB)
+def getFacingSurfaces(A, B, cutAwayDist=8, N=32):
+    _sA = getSurface(A)
+    _sB = getSurface(B)
+
+    _SE3 = np.zeros((5, 5, 5))
+
+    overlapA = _sA & B
+    overlapB = _sB & A
+
+    neighbourA = _sA & binary_dilation(B, structure=_SE3)
+    neighbourB = _sB & binary_dilation(A, structure=_SE3)
+
+    interfaceA = A & binary_dilation(B & ~A, structure=_SE3)
+    interfaceB = B & binary_dilation(A & ~B, structure=_SE3)
+
+    faceA = (
+        getFacingSurface(B, A, cutAwayDist=cutAwayDist, N=N)
+        | overlapA
+        | neighbourA
+        | interfaceA
+    )
+    faceB = (
+        getFacingSurface(A, B, cutAwayDist=cutAwayDist, N=N)
+        | overlapB
+        | neighbourB
+        | interfaceB
+    )
+
+    return faceA, faceB
 
 
-def getFacingSurfacePercentage(source, target, facingS=None, facingT=None):
-    if facingS is None or facingT is None:
-        facingS, facingT = getFacingSurfaces(source, target)
-
-    return np.sum(facingS) / getSurfaceArea(source), np.sum(facingT) / getSurfaceArea(target)
+def getFacingSurfacePercentage(A, facingA):
+    return np.sum(facingA) / getSurfaceArea(A)
 
 
-def getFacingSurfaceDistance(source, target, dmapS, dmapT, facingS=None, facingT=None):
-    if facingS is None or facingT is None:
-        facingS, facingT = getFacingSurfaces(source, target)
-
-    return dmapT[np.where(facingS)], dmapS[np.where(facingT)]
+def getFacingSurfaceDistance(dmapA, facingA):
+    return dmapA[np.where(facingA)]
